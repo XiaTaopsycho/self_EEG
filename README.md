@@ -1,5 +1,5 @@
-# self_EEG
+# moral_self_EEG
 
-# contributed by 
+Contributed by 
 Tao Xia @ HKU;
 Chuan-Peng Hu @ Unimedizin Mainz;
