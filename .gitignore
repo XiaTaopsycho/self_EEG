@@ -1,7 +1,11 @@
 *.eeg
 *.vhdr
 *.vmrk
+*.json
+*.tsv
 *.csv
+*.json
+*.tsv
 *.out
 *.xlsx
 *.xls
