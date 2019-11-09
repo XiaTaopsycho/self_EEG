@@ -1,4 +1,6 @@
-# moral_self_EEG
+# Moral_self_EEG_Exp1
+
+
 
 Contributed by 
 Tao Xia @ HKU;

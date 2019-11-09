@@ -1,4 +1,5 @@
 *.eeg
+*.fif
 *.vhdr
 *.vmrk
 *.json
