@@ -1,0 +1,845 @@
+---
+title: "moralSelfEEG_Study1"
+output: html_notebook
+---
+
+```{r setup, include = FALSE}
+rm(list = ls())
+# curDir = "/home/hcp4715/Data/EEGdata/moralSelfEEG2015/Analysis_Py/Exp1"
+curDir <- here::here()                       # In R-studio, use this line of code
+
+if (!grepl("Exp1", curDir, fixed = TRUE)){
+        curDir <- here::here('Exp1')
+}
+
+figDir <- here::here(curDir, 'figures')      # directory for figures.
+
+source(here::here(curDir, 'Initial.r'))
+
+# Seed for random number generation
+set.seed(42)
+options(tinytex.verbose = T) # debug the tex
+knitr::opts_chunk$set(message = FALSE)
+knitr::opts_chunk$set(cache.extra = knitr::rand_seed)
+```
+
+```{r loading data, echo=FALSE}
+df6a <- read.csv(here::here(curDir, 'rawdata_ERP_exp6a_201412_export_2021.csv'),header = TRUE, sep = ",",
+                 stringsAsFactors=FALSE,na.strings=c("","NA"), encoding="UTF-8") %>%
+        dplyr::rename(Subject = 1) %>%
+        dplyr::rename(BlockNo = BlockList.Sample,
+                      TrialNo = SubTrial,
+                      Matchness = YesNoResp, 
+                      Valence = Shape,
+                      ACC = Target.ACC, 
+                      CRESP = CorrectAnswer,                   # rename the columns
+                      RESP = Target.RESP, 
+                      RT = Target.RT) %>%    #
+        dplyr::mutate(Valence = ifelse(Valence == "Normal", "Neutral", Valence),                   # re-code the data
+                      Val_sh = ifelse(Label == "好人", 'Good',
+                                      ifelse(Label == '常人', 'Neutral', 'Bad')),
+                      Matchness = ifelse(Matchness == "Yes", "Match", "Mismatch"),
+                      Age = ifelse(Age == 0, NA, Age)) %>%
+        dplyr::mutate(Site = "THU",
+                      Subject = Subject + 6100)  %>% # here started with 61XX instead of 60XX, which is the id for anther project.
+        dplyr::mutate(RT = ifelse(is.na(RESP), NA, RT))
+
+# number of participant who practiced but not in the formal experiment
+nQuit <- length(unique(df6a$Subject[is.na(df6a$BlockNo)])) - length(unique(df6a$Subject[!is.na(df6a$BlockNo)]))
+
+df6a.T.basic     <- df6a %>%
+        dplyr::select(Site, Subject, Age, Sex) %>%
+        dplyr::distinct(Subject, .keep_all = TRUE) %>%    # the `distinct` function changed a lot in different versions.
+        dplyr::summarise(N = length(Subject),
+                         N_thu = length(Site[Site == "THU"]),
+                         N_wzu = length(Site[Site == "WZU"]),
+                         Nf = length(Sex[Sex == "female"]),
+                         Nm = length(Sex[Sex == "male"]),
+                         Age_mean = round(mean(Age,na.rm=TRUE),2),
+                         Age_sd = round(sd(Age,na.rm=TRUE),2))
+
+# participants should be excluded
+df6a.excld.sub <-  df6a %>%
+        dplyr::filter(!is.na(BlockNo)) %>%
+        dplyr::group_by(Subject) %>%
+        #dplyr::mutate(ACC = ifelse(RT <= 200, 0, ACC)) %>%  # set less than 200 ms response as wrong
+        dplyr::summarise(N = length(ACC),                   # caculate the overall accuracy for each subject
+                         N_crrct = sum(ACC),
+                         ACC = sum(ACC)/length(ACC)) %>%
+        dplyr::filter(ACC < 0.6) %>%                        # exlucde the participants with less than 60% overall accuracy
+        dplyr::select(Subject)
+
+# The rate of excluded trials in valid data
+df6a.no_resp_rate   <- df6a %>%
+        dplyr::filter(!is.na(BlockNo)) %>%
+        dplyr::filter(!(Subject %in% df6a.excld.sub$Subject)) %>%   # exclude the invalid subjects
+        dplyr::summarize(rate = length(RT[is.na(RESP)])/length(RT)) %>%
+        dplyr::pull()
+
+# The rate of excluded trials in valid data
+df6a.invalid_trial_rate   <- df6a %>%
+        dplyr::filter(!is.na(BlockNo)) %>%
+        dplyr::filter(!(Subject %in% df6a.excld.sub$Subject)) %>%   # exclude the invalid subjects
+        dplyr::summarize(rate = length(RT[RT <= 200])/length(RT)) %>%
+        dplyr::pull()
+
+df6a.v   <- df6a %>%
+        dplyr::filter(!is.na(BlockNo)) %>%
+        dplyr::filter(!(Subject %in% df6a.excld.sub$Subject)) %>%   # exclude the invalid subjects
+        dplyr::filter(!is.na(RESP)) %>%                             # exclude trials without response
+        # dplyr::filter(!(RT <= 200 & ACC == 1))                    # exclude < 200 trials
+        dplyr::filter(!(RT <= 200))                                 # exclude < 200 trials
+        
+df6a.v.basic  <- df6a.v %>%
+        dplyr::select(Site, Subject, Age, Sex) %>%
+        dplyr::distinct(Subject, .keep_all = TRUE) %>%
+        dplyr::summarise(N = length(Subject),
+                         N_thu = length(Site[Site == "THU"]),
+                         N_wzu = length(Site[Site == "WZU"]),
+                         Nf = length(Sex[Sex == "female"]),
+                         Nm = length(Sex[Sex == "male"]),
+                         Age_mean = round(mean(Age,na.rm=TRUE),2),
+                         Age_sd = round(sd(Age,na.rm=TRUE),2))
+
+# calculating the dprime 
+df6a.v.dprime_l <- df6a.v %>%
+        dplyr::mutate(sdt = dplyr::case_when((ACC == 1 & Matchness == 'Match') ~ "hit",
+                                             (ACC == 1 & Matchness == 'Mismatch') ~ "CR",
+                                             (ACC == 0 & Matchness == 'Match') ~ "miss",
+                                             (ACC == 0 & Matchness == 'Mismatch') ~ "FA")
+        ) %>% 
+        dplyr::group_by(Site, Subject, Age, Sex, Valence, sdt) %>%
+        dplyr::summarise(N = length(sdt)) %>%                                    # calculate the counts for each 
+        dplyr::ungroup() %>%
+        tidyr::spread(key = sdt, value = N,fill = 0) %>%                          # long-to-wide format
+        dplyr::mutate(hitR = hit/(hit + miss),                                    # hit rate
+                      FAR  = FA/(FA+CR)) %>%                                      # fa rate
+        dplyr::mutate(hitR = ifelse(hitR == 1, 1 - 1/(2*(hit + miss)), hitR),     # if hit rate is 1, standardize it
+                      FAR  = ifelse(FAR == 0, 1/(2*(hit + miss)), FAR)) %>%       # if FA rate is 0, standardize it
+        dplyr::mutate(dprime = qnorm(hitR) - qnorm(FAR)) %>%
+        dplyr::select(Site, Subject, Age, Sex, Valence, dprime) %>%   # select relevant columns
+        dplyr::mutate(Valence = factor(Valence, levels = c("Good","Neutral","Bad")))
+
+# Mean RT for each condition of each participant.
+df6a.v.rt_m <- df6a.v %>%
+        dplyr::filter(ACC == 1) %>%
+        dplyr::group_by(Site,Subject, Age, Sex, Matchness, Valence) %>%
+        dplyr::summarise(RT_m = mean(RT),
+                         RT_SD = sd(RT),
+                         Ntrial = length(RT)) %>%
+        dplyr::ungroup()
+
+```
+
+```{r comparingEventsInEEG, echo=FALSE}
+# get the full behavioral data from Eprime
+df_full <- df6a %>%
+        dplyr::filter(!is.na(BlockNo)) %>%
+        dplyr::select(-contains("prac")) %>%
+        dplyr::rename(subj_idx = Subject,
+                      block_id_old = BlockNo,
+                      trial_id = TrialNo) %>%
+        dplyr::group_by(subj_idx) %>%
+        # dplyr::arrange(Target.OnsetTime) %>%                        # sort by time
+        dplyr::mutate(block_id = ifelse(Session == 2, block_id_old + 9, block_id_old))  %>%   # create block 10!
+        dplyr::ungroup() %>%
+        dplyr::relocate(block_id, .before = block_id_old) %>%
+        dplyr::arrange(subj_idx, Session, block_id)
+
+# check the info of these data
+df_full_info <- df_full %>%
+        dplyr::group_by(subj_idx, block_id) %>%
+        dplyr::summarise(n=n()) %>%
+        dplyr::ungroup() %>%
+        dplyr::arrange(subj_idx, block_id,n) 
+
+# check the Target.OnsetTime, and found that it is not comparable between sessions
+df_13 <- df_full %>%
+        dplyr::filter(subj_idx == 6113) %>%
+        dplyr::relocate(Target.OnsetTime, .after = trial_id)
+
+# read data from Event, which is exported from MNE
+df_ev <- read.csv('df_events.csv') %>%
+        dplyr::mutate(Acc = ifelse(Real_Events == "R13", 1, 
+                                   ifelse(Real_Events == "R14", 0, NA)))
+
+df_ev_info <- df_ev %>%
+        dplyr::group_by(subj_idx, Block_id) %>%
+        dplyr::summarise(n=n()) %>%
+        dplyr::arrange(n)
+
+####issues 
+# 1: in EEG data, we have block_id with 10, this is not the case in eprime data, this was solved by adding block value to behavioral data
+#    However, it seems that this does not solve the problem
+
+# here we need to check those data manually
+df_ev2 <- df_ev %>%
+        dplyr::filter(!(subj_idx == 19 & Block_id == 2)) %>%
+        dplyr::filter(!(subj_idx == 24 & Block_id == 3)) %>%
+        dplyr::arrange(subj_idx, Block_id) 
+
+# fill the accuracy data
+for (rowid in seq(from = 1, to = nrow(df_ev2), by = 3)){
+        # print(rowid)
+        if (rowid < nrow(df_ev2)){
+                df_ev2$Acc[rowid]   = df_ev2$Acc[rowid + 2]
+                df_ev2$Acc[rowid+1] = df_ev2$Acc[rowid + 2]
+
+        }
+}
+
+# further separate the events column for re-shape the data
+df_ev2 <- df_ev2 %>%
+        dplyr::group_by(subj_idx, Block_id) %>%
+        dplyr::mutate(trial_id = rep(1:(n()/3), each=3)) %>%
+        dplyr::ungroup() %>%
+        dplyr::rename(block_id = Block_id) %>%
+        dplyr::arrange(subj_idx, block_id, trial_id) %>%
+        tidyr::separate(Real_Events, c('code', 'stim', 'val', 'match'), "_") %>%
+        tidyr::unite('stim', 'val', 'match') %>%
+        dplyr::mutate(events = ifelse(code %in% c( "R13", "R14"), "action", code)) %>%
+        dplyr::mutate(events = ifelse(grepl('R', events), "prime", 
+                                      ifelse(grepl('S', events), "target", events))) %>%
+        dplyr::mutate(events = ifelse(events=="action", "Resp", events))
+
+# fill the stim column for re-shaping the data
+for (ii in seq(from = 3, to = nrow(df_ev2), by=3)){
+        df_ev2$stim[ii] = df_ev2$stim[ii-1]
+}
+
+# re-shape the data from long to wide, by pivot_wider
+df_ev3 <- df_ev2 %>%
+        dplyr::select(-c(duration, events_id)) %>%
+        dplyr::select(-code) %>%
+        tidyr::pivot_wider(# id_cols =, 
+                           names_from =  c(events),
+                           values_from = c(time, time_gap, Acc, Code_eprm)) %>%
+        dplyr::arrange(subj_idx, block_id, trial_id) %>%
+        dplyr::select(-c(Acc_target, Acc_Resp, Code_eprm_Resp)) %>%
+        dplyr::rename(ACC = Acc_prime, 
+                      Dur_prime_tar = time_gap_target,
+                      Dur_tar_blank = time_gap_Resp,
+                      Dur_blank_NetxPrime = time_gap_prime) %>%
+        dplyr::relocate(stim, .after = trial_id) %>%
+        dplyr::relocate(Dur_blank_NetxPrime, .after = Dur_tar_blank) %>%
+        dplyr::mutate(subj_idx = 6100 + subj_idx,
+                      ACC = as.integer(ACC)) 
+
+# move the duration between blank and next trial to the current trial
+df_ev3$Dur_blank_NetxPrime_new <- NA
+for (ii in seq(1:nrow(df_ev3))){
+  if (ii %% 60 == 0){
+        df_ev3$Dur_blank_NetxPrime_new[ii] <- NA
+    
+  } else {
+        df_ev3$Dur_blank_NetxPrime_new[ii] <- df_ev3$Dur_blank_NetxPrime[ii+1]
+  }
+}
+
+df_ev3 <- df_ev3 %>%
+        dplyr::relocate(Dur_blank_NetxPrime_new, .after = Dur_blank_NetxPrime)
+
+common_subj <- intersect(unique(df_ev3$subj_idx), unique(df_full$subj_idx))
+
+df_full_common <- df_full %>% 
+        dplyr::filter(subj_idx %in% common_subj) %>% 
+        dplyr::group_by(subj_idx) %>%
+        dplyr::summarise(n=n())
+
+# full join the eeg events and behavioral data, will not be used
+df_ev4 <- df_ev3 %>%
+        dplyr::full_join(., df_full,
+                         by = c("subj_idx", 
+                                "block_id",
+                                "trial_id"))
+
+tmp <- df_ev4 %>%
+        # dplyr::filter(subj_idx == 6113)  %>%
+        dplyr::filter(ACC.x != ACC.y) %>%
+        dplyr::select(subj_idx, block_id, trial_id, ACC.x, ACC.y, CRESP, RESP, RT, Target.OnsetTime)
+
+# Inner join the  eeg events and behavioral data, will be used
+df_ev5 <- df_ev3 %>%
+        dplyr::inner_join(., df_full,
+                         by = c("subj_idx", 
+                                "block_id",
+                                "trial_id")) # %>%
+        # dplyr::filter(ACC.x == ACC.y)
+
+# Check the accuracy from EEG and E-prime, one trial seems to have a problem
+tmp <- df_ev5 %>%
+        # dplyr::filter(subj_idx == 6113)  %>%
+        dplyr::filter(ACC.x != ACC.y)
+
+# check the trigger between EEG and E-Prime and pull the subj_idx information, returns zero
+tmp3 <- df_ev5 %>%
+        dplyr::filter(Code_eprm_target != Code) %>% # trigger in eprime is not the same as in eeg data, check the trial order!!!
+        dplyr::group_by(subj_idx) %>%
+        dplyr::summarise(n=n())
+
+df_ev6 <- df_ev5 %>%
+        dplyr::filter( !(subj_idx %in% tmp3$subj_idx)) %>%
+        dplyr::relocate(RT, .after = Dur_blank_NetxPrime_new) %>%
+        dplyr::relocate(Target.OnsetDelay, .after = RT) %>%
+        dplyr::relocate(ITIDur, .before = RT) %>%
+        dplyr::mutate(ACC = ifelse(ACC.x != ACC.y, NA, ACC.y),
+                      ACC = ifelse(is.na(RT), NA, ACC),
+                      RT = ifelse(is.na(ACC), NA, RT)) %>%
+        dplyr::relocate(ACC, .before = RT) %>%
+        dplyr::mutate(Dur_tar_real = Dur_tar_blank - ITIDur) %>%
+        dplyr::relocate(Dur_tar_real, .before=ITIDur) %>%
+        dplyr::mutate(# Dur_blank_prime = ifelse(Dur_blank_prime > 100, NA, Dur_blank_prime),
+                      Dur_resp_NextPrime = ifelse(is.na(RT), NA, 
+                                              Dur_tar_blank - RT + Dur_blank_NetxPrime_new), 
+                      Dur_resp_NextPrime = ifelse(is.na(Dur_blank_NetxPrime_new), 2999, Dur_resp_NextPrime)) %>%
+        dplyr::relocate(Dur_resp_NextPrime, .after = Dur_prime_tar) %>%
+        dplyr::rename(time_EndTrial = time_Resp) %>%
+        dplyr::mutate(time_resp = time_target + RT) %>%
+        dplyr::relocate(time_resp, .before = time_EndTrial)  %>%
+        dplyr::mutate(Valence = ifelse(Valence == "Neutral", "Neut", Valence)) %>%
+        tidyr::unite("Cond_eprime", c(Valence, Matchness), remove = FALSE) %>%
+        dplyr::mutate(Cond_eprime = tolower(Cond_eprime))
+        
+
+describe(df_ev6$Dur_blank_NetxPrime)
+describe(df_ev6$Dur_resp_NextPrime)
+
+df_ev6_info <- df_ev6 %>%
+        dplyr::group_by(subj_idx) %>%
+        dplyr::summarise(n=n()) %>%
+        dplyr::ungroup()
+
+hist(df_ev6$Dur_resp_NextPrime)
+
+# check trials with short (<= 500ms) resp-prime intervals
+df_ev6_short <- df_ev6 %>%
+        dplyr::filter(Dur_resp_NextPrime <= 500)  %>%
+        dplyr::group_by(subj_idx) %>%
+        dplyr::summarise(n=n()) %>%
+        dplyr::ungroup() %>%
+        dplyr::arrange(n)
+
+
+# comparing data from EEG and behavioral
+sum(df_ev6$Code_eprm_prime !=df_ev6$Code1) # is the trigger for onset of prime is consistent?
+sum(df_ev6$ACC.x !=df_ev6$ACC.y)           # is the accuracy in EEG is consistent with that from E-Prime? No, there was one trial, set to NA 
+sum(df_ev6$stim != df_ev6$Cond_eprime)     # is the conditions are the same?
+
+sum(is.na(df_ev6$time_resp)) # in 23 participants (two participant with 8 blocks, 3 with 10 blocks), there are 811 trials without response. 
+
+
+df_ev7_tmp <- df_ev6 %>% 
+        dplyr::filter(!is.na(time_resp)) %>%        # remove the trials without response
+        dplyr::select(subj_idx:stim, Code_eprm_prime, Code_eprm_target, ACC) %>%
+        dplyr::rename(Code_prime = Code_eprm_prime,
+                      Code_target = Code_eprm_target) %>%
+        dplyr::mutate(Code_resp = ifelse(ACC == 1, "1013", ifelse(ACC == 0, "1014", NA)),
+                      Code_blank = '999') %>%
+        dplyr::select(-ACC) %>%
+        tidyr::pivot_longer(Code_prime:Code_blank,
+                            names_to = "triggers",
+                            values_to = "Code",
+                            names_prefix = "Code_") %>%
+        #dplyr::mutate(triggers = ifelse(triggers == "EndTrial", "blank", triggers)) %>%
+        tidyr::unite(triggers, c(triggers, stim))
+
+df_ev7 <- df_ev6 %>% 
+        dplyr::filter(!is.na(time_resp)) %>%        # remove the trials without response
+        dplyr::select(subj_idx:time_EndTrial) %>%
+        tidyr::pivot_longer(time_prime:time_EndTrial,
+                            names_to = "triggers",
+                            values_to = "time",
+                            names_prefix = "time_") %>%
+        dplyr::mutate(triggers = ifelse(triggers == "EndTrial", "blank", triggers)) %>%
+        tidyr::unite(triggers, c(triggers, stim)) %>% 
+        dplyr::left_join(., df_ev7_tmp)
+
+write.csv(df_ev7, file = "df_events_add_RT.csv", row.names = F)
+```
+
+## Experiment 6a: EEG study 1
+Experiment 6a was conducted to study the neural correlates of the positive prioritization effect. The behavioral paradigm is same as experiment 2. 
+
+### Method
+
+#### Participants
+`r df6a.T.basic$N` college students (`r df6a.T.basic$Nf` female, age = `r df6a.T.basic$Age_mean` $\pm$ `r df6a.T.basic$Age_sd`) participated the current study, all of them were from Tsinghua University in 2014. Informed consent was obtained from all participants prior to the experiment according to procedures approved by a local ethics committee. No participant was excluded from behavioral analysis.
+
+### Experimental design
+The experimental design of this experiment is same as experiment 2:  a 3 × 2 within-subject design with moral valence (good, neutral and bad associations) and matchness between shape and label (match vs. mismatch for the personal association) as within-subject variables. 
+
+#### Stimuli
+Three geometric shapes (triangle, square and circle, each 4.6º × 4.6º of visual angle) were presented at the center of screen for 50 ms after 500ms of fixation (0.8º × 0.8º of visual angle). The association of the three shapes to bad person (“坏人, HuaiRen”), good person (“好人, HaoRen”) or ordinary  person (“常人, ChangRen”) was counterbalanced across participants. The words bad person, good person or ordinary  person (3.6º × 1.6º) was also displayed at the center fo the screen. Participants had to judge whether the pairings of label and shape matched (e.g., Does the circle represent a bad person?). The experiment was run on a PC using E-prime software (version 2.0). These stimuli were displayed on a 22-in CRT monitor (1024×768 at 100Hz).
+We used backward masking to avoid over-processing of the moral words, in which a scrambled picture were presented for 900 ms after the label. Also, to avoid the ceiling effect on accuracy, shapes were presented on a noisy background based on our pilot studies. The noisy images were made by scrambling a picture of 3/4gray and ¼ white at resolution of 2 × 2 pixel. 
+
+#### Procedure
+The procedure was similar to Experiment 2. Participants finished 9 blocks of trial, each with 120 trials. In total, participants finished 180 trials for each combination of condition.
+
+As in experiment 2 (Sui, He, & Humphreys, 2012), subjects first learned the associations between labels and shapes and then completed a shape-label matching task (e.g., good person-triangle). In each trial of the matching task, a fixation were first presented for 500 ms, followed by a 50 ms label; then, a scrambled picture presented 900 ms. After the backward mask, the shape were presented on a noisy background for 50ms. Participant have to response in 1000ms after the presentation of the shape, and finally, a feedback screen was presented for 500 ms (see figure 1). The inter-trial interval (ITI) were randomly varied at the range of 1000 ~ 1400 ms. 
+
+All the stimuli were presented on a gray background (RGB: 127, 127, 127). E-primed 2.0 was used to present stimuli and collect behavioral results. Data were collected and analyzed when accuracy performance in total reached 60%. 
+
+### Data Analysis
+The the generalized linear model can be re-written to include two levels:
+$$ \Phi(p_{ij}) = 0 + \beta_{0j}Valence_{ij} + \beta_{1j}IsMatch_{ij} * Valence_{ij}$$
+We again can write the generalized linear model on the probits (z-scores; $\Phi$, "Phi") of $p$s. 
+
+The subjective-specific intercepts ($\beta_{0} = -zFAR$) and slopes ($\beta_{1} = d'$) are describe by multivariate normal with means and a covariance matrix for the parameters.
+$$ \begin{bmatrix}\beta_{0j}\\
+\beta_{1j}\\
+\end{bmatrix} \sim N(\begin{bmatrix}\theta_{0}\\
+\theta_{1}\\
+\end{bmatrix}, \sum) $$
+
+For experiments that had 2 (matching: match vs. non-match) by 3 (moral character: good vs. neutral vs. bad), i.e., experiment 1a, 1b, 1c, 2, 5, and 6a, the formula for accuracy in `BRMs` is as follow:
+
+`saymatch ~ 0 + Valence + Valence:ismatch + (0 + Valence + Valence:ismatch | Subject), family = bernoulli(link="probit")`
+
+
+### Results
+#### NHST
+
+```{r 'ex6a-dprime-rt', fig.cap="RT and *d* prime of Experiment 6a.", fig.height=6, fig.width=15, warning=FALSE}
+p_6a_d_rt <- Val_plot_NHST(df.rt = df6a.v.rt_m, df.d = df6a.v.dprime_l)
+
+```
+
+Only the behavioral results were reported here. Figure \@ref(fig:ex6a-dprime-rt) shows *d* prime and reaction times of experiment 6a.
+
+##### d prime
+```{r analyzing for d prime_e6a, echo=FALSE, results='hide', warning=FALSE, message=FALSE}
+# anova for d prime with 2*2 design
+df6a_dprime_anova <- afex::aov_ez('Subject','dprime',df6a.v.dprime_l,  # using afex's function 
+                                  within = c('Valence'))
+# df6a_dprime_anova_apa <- df6a_dprime_anova %>% papaja::apa_print.afex_aov()
+
+df6a_dprime_anova_apa <- df6a_dprime_anova %>% papaja::apa_print()
+
+posthoc_6a_d <- lsmeans::lsmeans(df6a_dprime_anova, specs = 'Valence')
+graphics::pairs(posthoc_6a_d)
+# plot(posthoc_5a_d, comparisons = TRUE)
+```
+We conducted repeated measures ANOVA, with moral valence as independent variable. The results revealed the main effect of valence (`r df6a_dprime_anova_apa$full$Valence`). Post-hoc analysis revealed that shapes link with Good person (mean = 3.13, SE = 0.109) is greater than Neutral condition (mean = 2.88, SE = 0.14),*t* = 2.916, *df* = 24, *p* = 0.02, p-value adjusted by Tukey method, but the *d* prime between Good and bad (mean = 3.03, SE = 0.142) (*t* = 1.512, *df* = 24, *p* = 0.3034, p-value adjusted by Tukey method), bad and neutral (*t* = 1.599, *df* = 24, *p* = 0.2655, p-value adjusted by Tukey method) were not significant.
+
+##### Reaction times.
+The results of reaction times of matchness trials showed similar pattern as the *d* prime data.
+```{r 6a_RT, echo=FALSE, results='hide', warning=FALSE, message=FALSE}
+
+df6a_RT_anova <- afex::aov_ez('Subject','RT_m',df6a.v.rt_m,     # using afex's function 
+                                  within = c('Matchness','Valence'))
+df6a_RT_anova_apa <- df6a_RT_anova %>% papaja::apa_print()
+
+# match trials
+df6a.v.rt_m1 <- df6a.v %>%
+  dplyr::filter(ACC == 1 & Matchness == "Match") %>%
+  dplyr::group_by(Site,Subject,Matchness, Valence) %>%
+  dplyr::summarise(RT_m = mean(RT),
+                   Ntrial = length(RT)) %>%
+  dplyr::ungroup() %>%
+  dplyr::mutate(Valence = factor(Valence, levels = c("Good","Neutral","Bad")))
+
+df6a_RT_anova_m <- afex::aov_ez('Subject','RT_m',df6a.v.rt_m1,     # using afex's function 
+                                  within = c('Valence'))
+df6a_RT_anova_m_apa <- df6a_RT_anova_m %>% papaja::apa_print()
+
+posthoc_6a_rt <- emmeans::emmeans(df6a_RT_anova_m, "Valence") # compare each valence for both self and other condition
+# pairs(posthoc_6a_rt)
+
+# Mismatch trials
+df6a.v.rt_m2 <- df6a.v %>%
+  dplyr::filter(ACC == 1 & Matchness == "Mismatch") %>%
+  dplyr::group_by(Site,Subject,Matchness, Valence) %>%
+  dplyr::summarise(RT_m = mean(RT),
+                   Ntrial = length(RT)) %>%
+  dplyr::ungroup()
+
+df6a_RT_anova_nm <- afex::aov_ez('Subject','RT_m', df6a.v.rt_m2,     # using afex's function 
+                                  within = c('Valence'))
+df6a_RT_anova_nm_apa <- df6a_RT_anova_nm %>% papaja::apa_print()
+
+graphics::pairs(posthoc_6a_rt)
+```
+
+We found interaction between Matchness and Valence (`r df6a_RT_anova_apa$full$Matchness_Valence`) and then analyzed the matched trials and mismatched trials separately, as in experiment 2. For matched trials, we found the effect of valence `r df6a_RT_anova_m_apa$full$Valence`. For non-matched trials, there was no significant effect of Valence (`r df6a_RT_anova_nm_apa$full$Valence`). Post-hoc *t*-tests revealed that shapes associated with Good Person (mean = 550, SE = 13.8) were responded faster than Neutral-Person (501, SE = 14.7), (*t*(24) = -5.171, *p* = 0.0001) and Bad Person (523, SE = 16.3), *t*(24) = -8.137, *p* < 0.0001)., and Neutral is faster than Bad-Person condition (*t*(32) = -3.282, *p* = 0.0085).
+
+#### BGLM
+
+```{r define_funs, echo=FALSE, results='hide'}
+# define a function to run the sdt GLMM for all exp with Matchness * Valence design
+# for 1a, 1b, 1c, 2, 6a
+fun_sdt_val <- function(exp_name, curDir) {
+  df_name <- paste('df', exp_name, '.v', sep = '')
+  m_name <- here::here(curDir, paste("glmmModels/exp", exp_name, "_sdt_m1_TreatContrast", sep = ''))
+  # m_name <- paste("glmmModels/exp", exp_name, "_sdt_m1_DummyCode", sep = '')
+  df <- get(df_name)  # get the data by string
+  
+  m <- df %>%
+  dplyr::filter(!is.na(RESP)) %>% # filter trials without response
+  dplyr::mutate(ismatch = ifelse(Matchness == 'Match', 1, 0),
+                saymatch = ifelse((Matchness == 'Match' & ACC == 1) | 
+                                    (Matchness == 'Mismatch' & ACC == 0), 1, 0),
+                Valence = factor(Valence, levels = c('Neutral', 'Bad', 'Good'))) %>%
+  brms::brm(saymatch ~ 0 + Valence + ismatch:Valence + 
+              (0 + Valence + ismatch:Valence | Subject),
+            family = bernoulli(link="probit"),
+            data = .,
+            control = list(adapt_delta = .99),
+            iter = 4000,
+            thin = 2,
+            cores = parallel::detectCores(),
+            file = here::here(m_name),
+            backend = 'cmdstanr')
+  return(m)
+}
+
+fun_sdt_val2 <- function(exp_name, curDir) {
+  df_name <- paste('df', exp_name, '.v', sep = '')
+  m_name <- here::here(curDir, paste("glmmModels/exp", exp_name, "_sdt_m2_TreatContrast", sep = ''))
+  # m_name <- paste("glmmModels/exp", exp_name, "_sdt_m1_DummyCode", sep = '')
+  df <- get(df_name)  # get the data by string
+  
+  m <- df %>%
+  dplyr::filter(!is.na(RESP)) %>% # filter trials without response
+  dplyr::mutate(ismatch = ifelse(Matchness == 'Match', 1, 0),
+                saymatch = ifelse((Matchness == 'Match' & ACC == 1) | 
+                                    (Matchness == 'Mismatch' & ACC == 0), 1, 0),
+                Valence = factor(Valence, levels = c('Neutral', 'Bad', 'Good')),
+                shape_pic = ifelse(stringr::str_detect(shapepic, 'C.'), 'circle',
+                                     ifelse(stringr::str_detect(shapepic, 'S.'), 'square', 'triangle'))) %>%
+  brms::brm(saymatch ~ 0 + Valence + ismatch:Valence + 
+                    (0 + Valence + ismatch:Valence | Subject) +
+                    (0 + Valence + ismatch:Valence | shape_pic),
+            family = bernoulli(link="probit"),
+            data = .,
+            control = list(adapt_delta = .99),
+            iter = 4000,
+            thin = 2,
+            cores = parallel::detectCores(),
+            file = here::here(m_name),
+            backend = 'cmdstanr')
+  return(m)
+}
+
+
+fun_plot_sdt_val <- function(m_sdt) {
+    # extract c
+    tmp_c <- m_sdt %>% 
+      tidybayes::gather_draws(b_ValenceBad, b_ValenceNeutral, b_ValenceGood) %>%
+      dplyr::rename(Valence = .variable, sdt_c = .value) %>% dplyr::ungroup() %>%
+      dplyr::mutate(Valence = gsub("b_", "", Valence)) %>%
+      dplyr::mutate(Valence = ifelse(stringr::str_detect(Valence, 'Bad'), 'Bad',
+                                     ifelse(stringr::str_detect(Valence, 'Good'), 'Good', 'Neutral')))
+    
+    # dprime
+    tmp_d <- m_sdt %>% 
+      tidybayes::gather_draws(`b_ValenceBad:ismatch`, `b_ValenceNeutral:ismatch`, 
+                              `b_ValenceGood:ismatch`) %>%
+      dplyr::rename(Valence = .variable, sdt_d = .value) %>% dplyr::ungroup() %>%
+      dplyr::mutate(Valence = gsub("b_", "", Valence)) %>%
+      dplyr::mutate(Valence = ifelse(stringr::str_detect(Valence, 'Bad'), 'Bad',
+                                     ifelse(stringr::str_detect(Valence, 'Good'), 'Good', 'Neutral')))
+    
+    # plot summaries with densities
+    p_sdt_d_sum <- tmp_d %>%
+      dplyr::mutate(Valence = factor(Valence, levels = c('Bad', 'Neutral', 'Good'))) %>%
+      ggplot2::ggplot(aes(x = sdt_d, y = Valence)) +
+      tidybayes::stat_halfeyeh() + 
+      labs(x = "sensitivity (d')", y = 'Posterior') +
+      theme_classic()
+    
+    p_sdt_c_sum <- tmp_c %>%
+      dplyr::mutate(Valence = factor(Valence, levels = c('Bad', 'Neutral', 'Good'))) %>%
+      ggplot2::ggplot(aes(x = sdt_c, y = Valence)) +
+      tidybayes::stat_halfeyeh() + 
+      labs(x = "criteria (c)", y = 'Posterior') +
+      theme_classic()
+    
+    # plot comparison
+    p_sdt_d <- tmp_d %>%
+      dplyr::mutate(Valence = factor(Valence, levels = c('Neutral', 'Bad', 'Good'))) %>%
+      tidybayes::compare_levels(sdt_d, by = Valence) %>%
+      ggplot2::ggplot(aes(x = sdt_d, y = Valence, fill = stat(x > 0))) +
+      tidybayes::stat_halfeyeh() + 
+      geom_vline(xintercept =0, linetype = "dashed") +
+      scale_fill_manual(values = c("gray80", "skyblue")) +
+      labs(x = "sensitivity (d')", y = 'Comparison') +
+      theme_classic()
+    
+    p_sdt_c <- tmp_c %>%
+      dplyr::mutate(Valence = factor(Valence, levels = c('Neutral', 'Bad', 'Good'))) %>%
+      tidybayes::compare_levels(sdt_c, by = Valence) %>%
+      ggplot2::ggplot(aes(x = sdt_c, y = Valence, fill = stat(x > 0))) +
+      tidybayes::stat_halfeyeh() + 
+      geom_vline(xintercept =0, linetype = "dashed") +
+      scale_fill_manual(values = c("gray80", "skyblue")) +
+      labs(x = "criteria (c)", y = 'Comparison') +
+      theme_classic()
+    
+    return(list(p_sdt_d_sum, p_sdt_c_sum, p_sdt_d, p_sdt_c))
+}
+
+# define a function to run the RT GLMM for all exp with Matchness * Valence design
+fun_rt_val <- function(exp_name, curDir) {
+  df_name <- paste('df', exp_name, '.v', sep = '')
+  m_name <- here::here(curDir, paste("glmmModels/exp", exp_name, "_rt_m1_TreatContrast", sep = ''))
+  df <- get(df_name)  # get the data by string
+  m <- df %>%
+    dplyr::mutate(RT_sec = RT/1000) %>% # log RT in seconds
+    dplyr::filter(ACC == 1) %>%
+    dplyr::mutate(ismatch = ifelse(Matchness == 'Match', 1, 0),
+                  Valence = factor(Valence, levels = c('Neutral', 'Bad', 'Good'))) %>%
+    brms::brm(RT_sec ~ ismatch*Valence + (ismatch*Valence | Subject),
+              family = shifted_lognormal(),
+              data = ., control = list(adapt_delta = .99),
+              iter = 4000,
+              thin = 2,
+              cores = parallel::detectCores(),
+              file = here::here(m_name),
+              backend = 'cmdstanr')
+  return(m)
+}
+
+fun_plot_rt_val <- function(m_rt) {
+    tmp_rt <- m_rt %>% 
+      tidybayes::spread_draws(b_Intercept, b_ValenceBad, b_ValenceGood, 
+                              b_ismatch,   `b_ValenceBad:ismatch`, `b_ValenceGood:ismatch`) %>%
+      dplyr::mutate(Neut_MM = b_Intercept,
+                    Bad_MM = Neut_MM + b_ValenceBad,
+                    Good_MM = Neut_MM + b_ValenceGood,
+                    Neut_M = Neut_MM + b_ismatch,
+                    Bad_M = Neut_MM + b_ismatch + `b_ValenceBad:ismatch`,
+                    Good_M = Neut_MM + b_ismatch + `b_ValenceGood:ismatch`) %>%
+      dplyr::select(-contains('b_')) %>%
+      tidyr::pivot_longer(cols = Neut_MM:Good_M,
+                          names_to = 'cond',
+                          values_to = 'logRT') %>%
+      dplyr::mutate(RT = exp(logRT)*1000,
+                    Matchness = dplyr::case_when(grepl("_MM$", cond) ~ "Mismatch",
+                                                 grepl("_M$", .variable) ~ "Match"),
+                    Valence = dplyr::case_when(grepl("Neut", cond) ~ "Neutral",
+                                               grepl("Bad", cond) ~ "Bad",
+                                               grepl("Good", cond) ~ "Good")
+                    )
+    p_exp1b_rt_m_sum <- tmp_rt %>% dplyr::mutate(Valence = factor(Valence, levels = c('Bad', 'Neutral', 'Good'))) %>%
+      dplyr::filter(Matchness == 'Match') %>%
+      ggplot2::ggplot(aes(x = RT, y = Valence)) +
+      tidybayes::stat_halfeyeh() + 
+      labs(x = "RTs (Matching, ms)", y = 'Posterior') +
+      theme_classic()
+    p_exp1b_rt_mm_sum <- tmp_rt %>% dplyr::mutate(Valence = factor(Valence, levels = c('Bad', 'Neutral', 'Good'))) %>%
+      dplyr::filter(Matchness == 'Mismatch') %>%
+      ggplot2::ggplot(aes(x = RT, y = Valence)) +
+      tidybayes::stat_halfeyeh() + 
+      labs(tag = 'D', x = "RTs (Mismatching, ms)", y = 'Posterior') +
+      theme_classic()
+    
+    # plot comparison
+    p_exp1b_rt_m <- tmp_rt %>% dplyr::mutate(Valence = factor(Valence, levels = c('Neutral', 'Bad', 'Good'))) %>%
+      dplyr::filter(Matchness == 'Match') %>%
+      tidybayes::compare_levels(RT, by = Valence) %>%
+      ggplot2::ggplot(aes(x = RT, y = Valence, fill = stat(x < 0))) +
+      tidybayes::stat_halfeyeh() + 
+      geom_vline(xintercept =0, linetype = "dashed") +
+      scale_fill_manual(values = c("gray80", "skyblue")) +
+      labs(tag = 'C', x = "RTs (Matching, ms)", y = 'Comparison') +
+      theme_classic()
+    p_exp1b_rt_mm <- tmp_rt %>% dplyr::mutate(Valence = factor(Valence, levels = c('Neutral', 'Bad', 'Good'))) %>%
+      dplyr::filter(Matchness == 'Mismatch') %>%
+      tidybayes::compare_levels(RT, by = Valence) %>%
+      ggplot2::ggplot(aes(x = RT, y = Valence, fill = stat(x < 0))) +
+      tidybayes::stat_halfeyeh() + 
+      geom_vline(xintercept =0, linetype = "dashed") +
+      scale_fill_manual(values = c("gray80", "skyblue")) +
+      labs(tag = 'D', x = "RTs (Mismatching, ms)", y = 'Comparison') +
+      theme_classic()
+    return(list(p_exp1b_rt_m_sum, p_exp1b_rt_mm_sum, p_exp1b_rt_m, p_exp1b_rt_mm))
+}
+
+fun_sdt_val_id <- function(exp_name) {
+  df_name <- paste('df', exp_name, '.v', sep = '')
+  m_name <- paste("glmmModels/exp", exp_name, "_sdt_m1_DummyCode", sep = '')
+  df <- get(df_name)  # get the data by string
+  
+  m <- df %>%
+  dplyr::filter(!is.na(RESP)) %>% # filter trials without response
+  dplyr::mutate(ismatch = ifelse(Matchness == 'Match', 1, 0),
+                saymatch = ifelse((Matchness == 'Match' & ACC == 1) | 
+                                    (Matchness == 'Mismatch' & ACC == 0), 1, 0),
+                Valence = factor(Valence, levels = c('Neutral', 'Bad', 'Good')),
+                Identity = factor(Identity, levels = c('Self', 'Other'))) %>%
+  brms::brm(saymatch ~ 0 + Identity:Valence + ismatch:Identity:Valence + 
+              (0 + Identity:Valence + ismatch:Identity:Valence | Subject),
+            family = bernoulli(link="probit"),
+            data = .,
+            control = list(adapt_delta = .99),
+            iter = 4000,
+            thin = 2,
+            cores = parallel::detectCores(),
+            file = here::here(m_name),
+            backend = 'cmdstanr')
+  return(m)
+}
+
+# define a function to run the RT GLMM for all exp with Matchness * Valence design
+fun_rt_val_id <- function(exp_name) {
+  df_name <- paste('df', exp_name, '.v', sep = '')
+  m_name <- paste("glmmModels/exp", exp_name, "_rt_m1_DummyCode", sep = '')
+  df <- get(df_name)  # get the data by string
+  m <- df %>%
+    dplyr::mutate(RT_sec = RT/1000) %>% # log RT in seconds
+    dplyr::filter(ACC == 1) %>%
+    dplyr::mutate(ismatch = ifelse(Matchness == 'Match', 1, 0),
+                  Valence = factor(Valence, levels = c('Neutral', 'Bad', 'Good')),
+                  Identity = factor(Identity, levels=c('Self', 'Other'))) %>%
+    brms::brm(RT_sec ~ ismatch*Identity*Valence + (ismatch*Identity*Valence | Subject),
+              family = shifted_lognormal(),
+              data = ., control = list(adapt_delta = .99),
+              iter = 4000,
+              thin = 2,
+              cores = parallel::detectCores(),
+              file = here::here(m_name),
+              backend = 'cmdstanr')
+  return(m)
+}
+
+```
+
+##### Signal detection theory analysis of accuracy
+
+```{r 6a_BGLMM_sdt, echo=FALSE, results='hide', warning=FALSE, message=FALSE}
+exp6a_sdt_m1 <- fun_sdt_val('6a', curDir)   # Total execution time: 6491.1 seconds. macbook 3900.0 seconds
+
+# subject and shape as varying effect
+exp6a_sdt_m2 <- fun_sdt_val2('6a', curDir)  # Total execution time:  seconds.
+
+exp6a_sdt_modelComp <- performance::compare_performance(exp6a_sdt_m1, exp6a_sdt_m2)
+plot(exp6a_sdt_modelComp)
+
+summary(exp6a_sdt_m2)    # check summary
+pp_check(exp6a_sdt_m1)   # posterior predictive check
+
+hypothesis(exp6a_sdt_m1, "ValenceGood:ismatch > ValenceNeutral:ismatch")  # .97
+hypothesis(exp6a_sdt_m1, "ValenceGood:ismatch > ValenceBad:ismatch")      # .77
+hypothesis(exp6a_sdt_m1, "ValenceNeutral:ismatch < ValenceBad:ismatch")   # 0.92
+hypothesis(exp6a_sdt_m1, "ValenceGood > ValenceNeutral")  # 0.83
+hypothesis(exp6a_sdt_m1, "ValenceGood > ValenceBad")      # .99
+hypothesis(exp6a_sdt_m1, "ValenceNeutral > ValenceBad")   # 0.89
+
+# extract the population level parameters and plot criteria and d prime in a 2D scatter plot
+# criteria
+exp6a_sdt_p <- fun_plot_sdt_val(exp6a_sdt_m1)
+
+exp6a_sdt_p <- exp6a_sdt_m1 %>%
+  emmeans::emmeans( ~ ismatch | Valence) %>%
+  tidybayes::gather_emmeans_draws() %>%
+  dplyr::mutate(ismatch = ifelse(ismatch == 0, 'criterion', 'd prime'),
+                ismatch = factor(ismatch, levels = c('d prime', 'criterion')),
+                Valence = factor(Valence, levels = c('Good', 'Neutral',  'Bad'))
+                #,Identity = factor(Identity, levels = c('Self', 'Other'))
+                ) %>%
+  dplyr::filter(ismatch == 'd prime') %>%
+  ggplot2::ggplot(aes(x = Valence, y = .value)) +
+  #ggplot2::ggplot(aes(x = Valence, y = .value, group = .draw)) +
+  #geom_line(alpha = .01) +
+  tidybayes::stat_halfeye() + # position=position_dodge(width = 0.1)
+  stat_summary(aes(group = NA), fun.y = mean, geom = "line"
+               #,position=position_dodge(width = 0.1)
+               ) +
+  #scale_fill_brewer() +
+  #facet_grid(cols = vars(ismatch), scales = "free_y") +
+  ylab(expression(paste("Sensitivity ",italic("d'"), sep = ' '))) +
+  theme_classic() + 
+  theme(axis.title.x = element_blank())
+```
+##### Reaction time
+
+```{r 6a_BGLMM_rt, echo=FALSE, results='hide', warning=FALSE, message=FALSE}
+# fit a three-level hierarchical model for RT, didn't specify the prior
+exp6a_rt_m1 <- fun_rt_val('6a', curDir) # Total execution time: 12813.9 seconds
+#plot(exp6a_rt_m1, "b_")
+summary(exp6a_rt_m1)  # n
+#pp_check(exp1b_rt_m1)
+
+hypothesis(exp6a_rt_m1, "ismatch < 0")  # Effect of matchness: Match < mis-match, p = 1
+hypothesis(exp6a_rt_m1, "ismatch:ValenceGood < 0")  # Match good < Match Neutral, p = 0.99
+hypothesis(exp6a_rt_m1, "ismatch:ValenceBad > 0")   # Match Bad > Match Neutral, p = 0.99
+hypothesis(exp6a_rt_m1, "(ismatch:ValenceGood - ismatch:ValenceBad) < 0")   # Match Good < Match Bad, p = 1
+
+# exp6a_rt_p <- fun_plot_rt_val(exp6a_rt_m1)
+
+exp6a_rt_p <- exp6a_rt_m1 %>%
+  emmeans::emmeans( ~ ismatch | Valence) %>%
+  tidybayes::gather_emmeans_draws() %>%
+  dplyr::mutate(ismatch = ifelse(ismatch == 0, 'nonmatch', 'match'),
+              Valence = factor(Valence, levels = c('Good', 'Neutral',  'Bad'))) %>%
+  dplyr::filter(ismatch == 'match') %>%
+              #Identity = factor(Identity, levels = c('Self', 'Other'))
+  dplyr::rename(log_RT = .value) %>%
+  dplyr::mutate(`Reaction times (ms)` = exp(log_RT)*1000) %>%
+  ggplot2::ggplot(aes(x = Valence, y = `Reaction times (ms)`)) +
+  #ggplot2::ggplot(aes(x = Valence, y = .value, group = .draw)) +
+  #geom_line(alpha = .01) +
+  tidybayes::stat_halfeye() +
+  ggplot2::stat_summary(aes(group = NA), fun.y = mean, geom = "line") +
+  #scale_fill_brewer() +
+  # facet_grid(~ ismatch) +
+  theme_classic() + 
+  theme(axis.title.x = element_blank())
+```
+
+```{r plot-exp6a-BGLM, fig.cap="Exp6a: Results of Bayesian GLM analysis.",  fig.height=4.5, fig.width=9, warning=FALSE}
+# library(patchwork)
+# exp6a_sdt_p[[1]] + exp6a_sdt_p[[2]] + exp6a_sdt_p[[3]] + exp6a_sdt_p[[4]] + exp6a_rt_p[[1]] + exp6a_rt_p[[2]] + exp6a_rt_p[[3]] + exp6a_rt_p[[4]] + plot_annotation(tag_levels = 'A')  + plot_layout(nrow = 4, byrow = FALSE)
+# exp6a_sdt_p + exp6a_rt_p + plot_annotation(tag_levels = 'A')  + plot_layout(nrow = 1, byrow = FALSE)
+```
+
+### HDDM
+
+```{r plot-exp6a-HDDM, fig.cap="exp6a: Results of HDDM.",  fig.height=4.5, fig.width=9, warning=FALSE}
+df6a.hddm.group.trace <- readr::read_csv(here::here('HDDM','df6a_group_traces.csv')) # this will keep the '(' and ')' in the column name
+
+params_p <- df6a.hddm.group.trace %>%
+  dplyr::mutate(sample = 1:nrow(.)) %>%
+  dplyr::select(chain, sample, contains('Match') | contains('Mismatch')) %>%
+  tidyr::pivot_longer(.,`a(Match.Bad)`:`t(Mismatch.Neutral)`, names_to = 'conditions', values_to = 'value') %>%
+  tidyr::separate(., conditions, into = c('v1', 'valence'), sep= '[.]') %>%       # split into two part
+  tidyr::separate(., v1, into = c('param', 'matchness'), sep = '[(]') %>%         # further split the first half into two part
+  dplyr::mutate(valence = stringr::str_sub(.$valence, start = 1, end = -2)) %>%   # remove the last two elements ') ' from the strings
+  dplyr::arrange(., param) %>%
+  tidyr::pivot_wider(., id_cols = c('chain', 'sample', 'matchness', 'valence'), names_from = 'param', values_from = 'value')
+
+p_6a_hddm <- params_p %>% 
+  dplyr::mutate(valence = factor(valence, levels = c("Good", "Neutral", "Bad")),
+                matchness = ifelse(matchness == 'Mismatch', 'Nonmatch', matchness)) %>%
+  dplyr::filter(matchness == 'Match') %>%
+  ggplot2::ggplot(., aes(x = v, y = a, group = valence, color = valence)) +
+  geom_point() + 
+  scale_colour_brewer(palette = "Dark2") +
+  scale_fill_brewer(palette = "Dark2") +
+  #facet_grid(~ matchness) +
+  ylab(expression(paste("Boundary separation ",italic("a"), sep = ' '))) +
+  xlab(expression(paste("Drift rate ",italic("v"), sep = ' '))) +
+  theme_bw()+
+    theme(panel.grid.major = element_blank(),
+          panel.grid.minor = element_blank(),
+          panel.background = element_blank(),
+          panel.border = element_blank(),
+          text=element_text(family='Times'),
+          legend.title=element_blank(),
+          legend.text = element_text(size = 8),
+          legend.position="bottom",
+          plot.title = element_text(lineheight=.8, face="bold", size = 9, margin=margin(0,0,10,0)),
+          axis.text = element_text (size = 8, color = 'black'),
+          axis.title = element_text (size = 8),
+          #axis.title.x = element_blank(),
+          #axis.title.y = element_blank(),
+          axis.line.x = element_line(color='black', size = 1),    # increase the size of font
+          axis.line.y = element_line(color='black', size = 1),    # increase the size of font
+          strip.text = element_text (size = 8, color = 'black'), # size of text in strips, face = "bold"
+          panel.spacing = unit(3, "lines")
+    ) 
+```
+
+We fitted our data with HDDM, using the response-coding [also see @Hu_2020_GoodSelf]. We estimated separate drift rate ($v$), non-decision time ($T_{0}$), and boundary separation ($a$) for each condition. We found that, similar to experiment 2, the shapes tagged with good person has higher drift rate and higher boundary separation than shapes tagged with both neutral and bad person, but only for the self-referential condition. Also, the shapes tagged with neutral person has a higher drift rate than shapes tagged with bad person, but not for the boundary separation, and this effect also exist only for the  self-referential condition. 
+
+Interestingly, we found that  in both self-referential and other-referential conditions, the shapes associated bad valence have higher drift rate and higher boundary separation. which might suggest that the shape associated with bad stimuli might be prioritized in the non-match trials (see figure \@ref(fig:plot-exp6a-HDDM)).
